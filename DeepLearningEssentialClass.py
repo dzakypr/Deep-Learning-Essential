@@ -1,659 +1,620 @@
-{
-  "cells": [
-    {
-      "cell_type": "markdown",
-      "metadata": {
-        "id": "view-in-github",
-        "colab_type": "text"
-      },
-      "source": [
-        "<a href=\"https://colab.research.google.com/github/dzakypr/Deep-Learning-Essential/blob/main/DeepLearningEssentialClass.py\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
-      ]
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "import numpy as np\n",
-        "import datetime\n",
-        "import torch\n",
-        "import torch.nn as nn\n",
-        "import torch.optim as optim\n",
-        "import random\n",
-        "import matplotlib.pyplot as plt\n",
-        "from copy import deepcopy\n",
-        "from torch.utils.tensorboard import SummaryWriter\n",
-        "from torchvision.transforms import Normalize\n",
-        "from torch.optim.lr_scheduler import LambdaLR\n",
-        "import types\n",
-        "import inspect\n",
-        "\n",
-        "plt.style.use('fivethirtyeight')\n",
-        "\n",
-        "def make_lr_fn(start_iter, end_lr, num_iter, step_mode=\"exp\"):\n",
-        "    if(step_mode == \"linear\"):\n",
-        "        factor = (end_lr / start_iter-1)/num_iter\n",
-        "        def lr_fn(iteration):\n",
-        "            return(1 + iteration * factor)\n",
-        "    else:\n",
-        "        factor = (np.log(end_lr)-np.log(start_iter))/num_iter\n",
-        "        def lr_fn(iteration):\n",
-        "            return np.exp(factor)**iteration\n",
-        "    return lr_fn\n",
-        "\n",
-        "class DeepLearningEssential(object):\n",
-        "    def __init__(self, model, loss_fn, optimizer):\n",
-        "        self.model = model\n",
-        "        self.loss_fn = loss_fn\n",
-        "        self.optimizer = optimizer\n",
-        "        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'\n",
-        "        self.model.to(self.device)\n",
-        "\n",
-        "        self.train_loader = None\n",
-        "        self.val_loader = None\n",
-        "        self.writer = None\n",
-        "        self.scheduler = None\n",
-        "        self.is_batch_lr_scheduler = False\n",
-        "        self.clipping = None\n",
-        "\n",
-        "        self.losses = []\n",
-        "        self.val_losses = []\n",
-        "        self.learning_rates = []\n",
-        "        self.total_epochs = 0\n",
-        "\n",
-        "        self.visualization = {}\n",
-        "        self.handles = {}\n",
-        "\n",
-        "        self.train_step_fn = self._make_train_step_fn\n",
-        "        self.val_step_fn = self._make_val_step_fn\n",
-        "\n",
-        "    def to(self, device):\n",
-        "        try:\n",
-        "            self.device = device\n",
-        "            self.model.to(self.device)\n",
-        "        except RuntimeError:\n",
-        "            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'\n",
-        "            print(f\"Couldn't send it to {device}, sending it to {self.device} instead.\")\n",
-        "            self.model.to(self.device)\n",
-        "\n",
-        "    def set_loaders(self, train_loader, val_loader=None):\n",
-        "        self.train_loader = train_loader\n",
-        "        self.val_loader = val_loader\n",
-        "\n",
-        "    def set_tensorboard(self, name, folder=\"runs\"):\n",
-        "        suffix = datetime.datetime.now().strftime('%Y%m%d%H%M%S')\n",
-        "        self.writer = SummaryWriter(f'{folder}/{name}_{suffix}')\n",
-        "\n",
-        "    def _make_train_step_fn(self,x,y):\n",
-        "        self.model.train()\n",
-        "        yhat = self.model(x)\n",
-        "        loss = self.loss_fn(yhat,y)\n",
-        "        loss.backward()\n",
-        "\n",
-        "        if(self.clipping):\n",
-        "                self.clipping()\n",
-        "\n",
-        "        self.optimizer.step()\n",
-        "        self.optimizer.zero_grad()\n",
-        "\n",
-        "        return loss.item()\n",
-        "\n",
-        "    def _make_val_step_fn(self,x,y):\n",
-        "        self.model.eval()\n",
-        "        yhat = self.model(x)\n",
-        "        loss = self.loss_fn(yhat,y)\n",
-        "        return loss.item()\n",
-        "\n",
-        "    def set_train_step_fn(self, new_func=None):\n",
-        "        if(new_func is None):\n",
-        "            self.train_step_fn = self._make_train_step_fn()\n",
-        "            return\n",
-        "        self.train_step_fn = types.MethodType(new_func, self)\n",
-        "\n",
-        "    def set_val_step_fn(self, new_func=None):\n",
-        "        if(new_func is None):\n",
-        "            self.val_step_fn = self._make_val_step_fn()\n",
-        "            return\n",
-        "        self.val_step_fn = types.MethodType(new_func, self)\n",
-        "\n",
-        "    def print_train_fn(self):\n",
-        "        print(inspect.getsource(self.train_step_fn))\n",
-        "\n",
-        "    def print_val_fn(self):\n",
-        "        print(inspect.getsource(self.val_step_fn))\n",
-        "\n",
-        "    def _mini_batch(self, validation=False):\n",
-        "        if validation:\n",
-        "            data_loader = self.val_loader\n",
-        "            step_fn = self.val_step_fn\n",
-        "        else:\n",
-        "            data_loader = self.train_loader\n",
-        "            step_fn = self.train_step_fn\n",
-        "\n",
-        "        if data_loader is None:\n",
-        "            return None\n",
-        "\n",
-        "        n_batches = len(data_loader)\n",
-        "\n",
-        "        mini_batch_losses = []\n",
-        "        for i, (x_batch, y_batch) in enumerate(data_loader):\n",
-        "\n",
-        "            if isinstance(x_batch, list):\n",
-        "                for i in x_batch:\n",
-        "                    i.to(self.device)\n",
-        "            else:\n",
-        "                x_batch = x_batch.to(self.device)\n",
-        "\n",
-        "            if isinstance(y_batch, list):\n",
-        "                for i in y_batch:\n",
-        "                    i.to(self.device)\n",
-        "            else:\n",
-        "                y_batch = y_batch.to(self.device)\n",
-        "\n",
-        "            mini_batch_loss = step_fn(x_batch, y_batch)\n",
-        "            mini_batch_losses.append(mini_batch_loss)\n",
-        "\n",
-        "            if not validation:\n",
-        "                self._mini_batch_schedulers(i / n_batches)\n",
-        "\n",
-        "            loss = np.mean(mini_batch_losses)\n",
-        "            return loss\n",
-        "\n",
-        "    def set_seed(self, seed=42):\n",
-        "        torch.backends.cudnn.deterministic = True\n",
-        "        torch.backends.cudnn.benchmark = False\n",
-        "        torch.manual_seed(seed)\n",
-        "        np.random.seed(seed)\n",
-        "        random.seed(seed)\n",
-        "        try:\n",
-        "            self.train_loader.sampler.generator.manual_seed(seed)\n",
-        "        except AttributeError:\n",
-        "            pass\n",
-        "\n",
-        "    def train(self, n_epochs, seed=42):\n",
-        "        self.set_seed(seed)\n",
-        "\n",
-        "        for epoch in range(n_epochs):\n",
-        "            self.total_epochs+=1\n",
-        "\n",
-        "            loss = self._mini_batch(validation=False)\n",
-        "            self.losses.append(loss)\n",
-        "\n",
-        "            with torch.no_grad():\n",
-        "                val_loss = self._mini_batch(validation=True)\n",
-        "                self.val_losses.append(val_loss)\n",
-        "\n",
-        "            self._epoch_schedulers(val_loss)\n",
-        "\n",
-        "            if self.writer:\n",
-        "                scalars = {'training': loss}\n",
-        "                if val_loss is not None:\n",
-        "                    scalars.update({'validation': val_loss})\n",
-        "\n",
-        "                self.writer.add_scalars(main_tag='loss',\n",
-        "                                        tag_scalar_dict=scalars,\n",
-        "                                        global_step=epoch)\n",
-        "\n",
-        "        if self.writer:\n",
-        "            self.writer.close()\n",
-        "\n",
-        "    def save_checkpoint(self, filename):\n",
-        "        checkpoint = {\n",
-        "            \"epoch\" : self.total_epochs,\n",
-        "            \"model_state_dict\" : self.model.state_dict(),\n",
-        "            \"optimizer_state_dict\" : self.optimizer.state_dict(),\n",
-        "            \"loss\" : self.losses,\n",
-        "            \"val_losses\" : self.val_losses\n",
-        "        }\n",
-        "\n",
-        "        torch.save(checkpoint, filename)\n",
-        "\n",
-        "    def load_checkpoint(self, filename):\n",
-        "        checkpoint = torch.load(filename, weights_only=False)\n",
-        "\n",
-        "        self.model.load_state_dict(checkpoint['model_state_dict'])\n",
-        "        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])\n",
-        "\n",
-        "        self.total_epochs = checkpoint['epoch']\n",
-        "        self.losses = checkpoint['loss']\n",
-        "        self.val_losses = checkpoint['val_loss']\n",
-        "\n",
-        "        self.model.train()\n",
-        "\n",
-        "    def predict(self, x):\n",
-        "        self.model.eval()\n",
-        "        x = torch.as_tensor(x).float()\n",
-        "        yhat = self.model(x.to(self.device))\n",
-        "        self.model.train()\n",
-        "        return yhat.detach().cpu().numpy()\n",
-        "\n",
-        "    def plot_losses(self):\n",
-        "        fig = plt.figure(figsize=(10, 4))\n",
-        "        plt.plot(self.losses, label='Training Loss', c='b')\n",
-        "        plt.plot(self.val_losses, label='Validation Loss', c='r')\n",
-        "        plt.yscale('log')\n",
-        "        plt.xlabel('Epochs')\n",
-        "        plt.ylabel('Loss')\n",
-        "        plt.legend()\n",
-        "        plt.tight_layout()\n",
-        "        return fig\n",
-        "\n",
-        "    def add_graph(self):\n",
-        "        if self.train_loader and self.writer:\n",
-        "            x_sample, y_sample = next(iter(self.train_loader))\n",
-        "            self.writer.add_graph(self.model, x_sample.to(self.device))\n",
-        "\n",
-        "    def count_parameters(self):\n",
-        "        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)\n",
-        "\n",
-        "    @staticmethod\n",
-        "    def _visualize_tensors(axs, x, y=None, yhat=None, layer_name='', title=None):\n",
-        "        n_images = len(axs)\n",
-        "        minv, maxv = np.min(x[:n_images]), np.max(x[:n_images])\n",
-        "        for j, image in enumerate(x[:n_images]):\n",
-        "            ax = axs[j]\n",
-        "            # Sets title, labels, and removes ticks\n",
-        "            if title is not None:\n",
-        "                ax.set_title('{} #{}'.format(title, j), fontsize=12)\n",
-        "            ax.set_ylabel(\n",
-        "                '{}\\n{}x{}'.format(layer_name, *np.atleast_2d(image).shape),\n",
-        "                rotation=0, labelpad=40\n",
-        "            )\n",
-        "            xlabel1 = '' if y is None else '\\nLabel: {}'.format(y[j])\n",
-        "            xlabel2 = '' if yhat is None else '\\nPredicted: {}'.format(yhat[j])\n",
-        "            xlabel = '{}{}'.format(xlabel1, xlabel2)\n",
-        "            if len(xlabel):\n",
-        "                ax.set_xlabel(xlabel, fontsize=12)\n",
-        "            ax.set_xticks([])\n",
-        "            ax.set_yticks([])\n",
-        "\n",
-        "            # Plots weight as an image\n",
-        "            ax.imshow(\n",
-        "                np.atleast_2d(image.squeeze()),\n",
-        "                cmap='gray',\n",
-        "                vmin=minv,\n",
-        "                vmax=maxv\n",
-        "            )\n",
-        "        return\n",
-        "\n",
-        "    def visualize_filters(self, layer_name, **kwargs):\n",
-        "        try:\n",
-        "            # Gets the layer object from the model\n",
-        "            layer = self.model\n",
-        "            for name in layer_name.split('.'):\n",
-        "                layer = getattr(layer, name)\n",
-        "            # We are only looking at filters for 2D convolutions\n",
-        "            if isinstance(layer, nn.Conv2d):\n",
-        "                # Takes the weight information\n",
-        "                weights = layer.weight.data.cpu().numpy()\n",
-        "                # The weights have channels_out (filter), channels_in, H, W shape\n",
-        "                n_filters, n_channels, _, _ = weights.shape\n",
-        "\n",
-        "                # Builds a figure\n",
-        "                size = (2 * n_channels + 2, 2 * n_filters)\n",
-        "                fig, axes = plt.subplots(n_filters, n_channels, figsize=size)\n",
-        "                axes = np.atleast_2d(axes).reshape(n_filters, n_channels)\n",
-        "                # For each channel_out (filter)\n",
-        "                for i in range(n_filters):\n",
-        "                    DeepLearningEssential._visualize_tensors(\n",
-        "                        axes[i, :],\n",
-        "                        weights[i],\n",
-        "                        layer_name='Filter #{}'.format(i),\n",
-        "                        title='Channel' if (i == 0) else None\n",
-        "                    )\n",
-        "\n",
-        "                for ax in axes.flat:\n",
-        "                    ax.label_outer()\n",
-        "\n",
-        "                fig.tight_layout()\n",
-        "                return fig\n",
-        "\n",
-        "        except AttributeError:\n",
-        "            return\n",
-        "\n",
-        "    def attach_hooks(self, layers_to_hook, hook_fn=None):\n",
-        "        # Clear any previous values\n",
-        "        self.visualization = {}\n",
-        "        # Creates the dictionary to map layer objects to their names\n",
-        "        modules = list(self.model.named_modules())\n",
-        "        layer_names = {layer: name for name, layer in modules[1:]}\n",
-        "\n",
-        "        if hook_fn is None:\n",
-        "            # Hook function to be attached to the forward pass\n",
-        "            def hook_fn(layer, inputs, outputs):\n",
-        "                # Gets the layer name\n",
-        "                name = layer_names[layer]\n",
-        "                # Detaches outputs\n",
-        "                values = outputs.detach().cpu().numpy()\n",
-        "                # Since the hook function may be called multiple times\n",
-        "                # for example, if we make predictions for multiple mini-batches\n",
-        "                # it concatenates the results\n",
-        "                if self.visualization[name] is None:\n",
-        "                    self.visualization[name] = values\n",
-        "                else:\n",
-        "                    self.visualization[name] = np.concatenate([self.visualization[name], values])\n",
-        "\n",
-        "        for name, layer in modules:\n",
-        "            # If the layer is in our list\n",
-        "            if name in layers_to_hook:\n",
-        "                # Initializes the corresponding key in the dictionary\n",
-        "                self.visualization[name] = None\n",
-        "                # Register the forward hook and keep the handle in another dict\n",
-        "                self.handles[name] = layer.register_forward_hook(hook_fn)\n",
-        "\n",
-        "    def remove_hooks(self):\n",
-        "        # Loops through all hooks and removes them\n",
-        "        for handle in self.handles.values():\n",
-        "            handle.remove()\n",
-        "        # Clear the dict, as all hooks have been removed\n",
-        "        self.handles = {}\n",
-        "\n",
-        "    def visualize_outputs(self, layers, n_images=10, y=None, yhat=None):\n",
-        "        layers = list(filter(lambda l: l in self.visualization.keys(), layers))\n",
-        "        shapes = [self.visualization[layer].shape for layer in layers]\n",
-        "        n_rows = [shape[1] if len(shape) == 4 else 1 for shape in shapes]\n",
-        "        total_rows = np.sum(n_rows)\n",
-        "\n",
-        "        fig, axes = plt.subplots(total_rows, n_images, figsize=(1.5*n_images, 1.5*total_rows))\n",
-        "        axes = np.atleast_2d(axes).reshape(total_rows, n_images)\n",
-        "\n",
-        "        # Loops through the layers, one layer per row of subplots\n",
-        "        row = 0\n",
-        "        for i, layer in enumerate(layers):\n",
-        "            start_row = row\n",
-        "            # Takes the produced feature maps for that layer\n",
-        "            output = self.visualization[layer]\n",
-        "\n",
-        "            is_vector = len(output.shape) == 2\n",
-        "\n",
-        "            for j in range(n_rows[i]):\n",
-        "                DeepLearningEssential._visualize_tensors(\n",
-        "                    axes[row, :],\n",
-        "                    output if is_vector else output[:, j].squeeze(),\n",
-        "                    y,\n",
-        "                    yhat,\n",
-        "                    layer_name=layers[i] if is_vector else '{}\\nfil#{}'.format(layers[i], row-start_row),\n",
-        "                    title='Image' if (row == 0) else None\n",
-        "                )\n",
-        "                row += 1\n",
-        "\n",
-        "        for ax in axes.flat:\n",
-        "            ax.label_outer()\n",
-        "\n",
-        "        plt.tight_layout()\n",
-        "        return fig\n",
-        "\n",
-        "    def correct(self, x, y, threshold=.5):\n",
-        "        self.model.eval()\n",
-        "        yhat = self.model(x.to(self.device))\n",
-        "        y = y.to(self.device)\n",
-        "        self.model.train()\n",
-        "\n",
-        "        # We get the size of the batch and the number of classes\n",
-        "        # (only 1, if it is binary)\n",
-        "        n_samples, n_dims = yhat.shape\n",
-        "        if n_dims > 1:\n",
-        "            # In a multiclass classification, the biggest logit\n",
-        "            # always wins, so we don't bother getting probabilities\n",
-        "\n",
-        "            # This is PyTorch's version of argmax,\n",
-        "            # but it returns a tuple: (max value, index of max value)\n",
-        "            _, predicted = torch.max(yhat, 1)\n",
-        "        else:\n",
-        "            n_dims += 1\n",
-        "            # In binary classification, we NEED to check if the\n",
-        "            # last layer is a sigmoid (and then it produces probs)\n",
-        "            if isinstance(self.model, nn.Sequential) and \\\n",
-        "               isinstance(self.model[-1], nn.Sigmoid):\n",
-        "                predicted = (yhat > threshold).long()\n",
-        "            # or something else (logits), which we need to convert\n",
-        "            # using a sigmoid\n",
-        "            else:\n",
-        "                predicted = (torch.sigmoid(yhat) > threshold).long()\n",
-        "\n",
-        "        # How many samples got classified correctly for each class\n",
-        "        result = []\n",
-        "        for c in range(n_dims):\n",
-        "            n_class = (y == c).sum().item()\n",
-        "            n_correct = (predicted[y == c] == c).sum().item()\n",
-        "            result.append((n_correct, n_class))\n",
-        "        return torch.tensor(result)\n",
-        "\n",
-        "    @staticmethod\n",
-        "    def loader_apply(loader, func, reduce='sum'):\n",
-        "        results = [func(x, y) for i, (x, y) in enumerate(loader)]\n",
-        "        results = torch.stack(results, axis=0)\n",
-        "\n",
-        "        if reduce == 'sum':\n",
-        "            results = results.sum(axis=0)\n",
-        "        elif reduce == 'mean':\n",
-        "            results = results.float().mean(axis=0)\n",
-        "\n",
-        "        return results\n",
-        "\n",
-        "    @staticmethod\n",
-        "    def statistics_per_channel(images, labels):\n",
-        "        # NCHW\n",
-        "        n_samples, n_channels, n_height, n_weight = images.size()\n",
-        "        # Flatten HW into a single dimension\n",
-        "        flatten_per_channel = images.reshape(n_samples, n_channels, -1)\n",
-        "\n",
-        "        # Computes statistics of each image per channel\n",
-        "        # Average pixel value per channel\n",
-        "        # (n_samples, n_channels)\n",
-        "        means = flatten_per_channel.mean(axis=2)\n",
-        "        # Standard deviation of pixel values per channel\n",
-        "        # (n_samples, n_channels)\n",
-        "        stds = flatten_per_channel.std(axis=2)\n",
-        "\n",
-        "        # Adds up statistics of all images in a mini-batch\n",
-        "        # (1, n_channels)\n",
-        "        sum_means = means.sum(axis=0)\n",
-        "        sum_stds = stds.sum(axis=0)\n",
-        "        # Makes a tensor of shape (1, n_channels)\n",
-        "        # with the number of samples in the mini-batch\n",
-        "        n_samples = torch.tensor([n_samples]*n_channels).float()\n",
-        "\n",
-        "        # Stack the three tensors on top of one another\n",
-        "        # (3, n_channels)\n",
-        "        return torch.stack([n_samples, sum_means, sum_stds], axis=0)\n",
-        "\n",
-        "    @staticmethod\n",
-        "    def make_normalizer(loader):\n",
-        "        total_samples, total_means, total_stds = DeepLearningEssential.loader_apply(loader, DeepLearningEssential.statistics_per_channel)\n",
-        "        norm_mean = total_means / total_samples\n",
-        "        norm_std = total_stds / total_samples\n",
-        "        return Normalize(mean=norm_mean, std=norm_std)\n",
-        "\n",
-        "    def lr_range_test(self, data_loader, end_lr, num_iter=100, step_mode='exp', alpha=0.05, ax=None):\n",
-        "        # Since the test updates both model and optimizer we need to store\n",
-        "        # their initial states to restore them in the end\n",
-        "        previous_states = {'model': deepcopy(self.model.state_dict()),\n",
-        "                           'optimizer': deepcopy(self.optimizer.state_dict())}\n",
-        "        # Retrieves the learning rate set in the optimizer\n",
-        "        start_lr = self.optimizer.state_dict()['param_groups'][0]['lr']\n",
-        "\n",
-        "        # Builds a custom function and corresponding scheduler\n",
-        "        lr_fn = make_lr_fn(start_lr, end_lr, num_iter)\n",
-        "        scheduler = LambdaLR(self.optimizer, lr_lambda=lr_fn)\n",
-        "\n",
-        "        # Variables for tracking results and iterations\n",
-        "        tracking = {'loss': [], 'lr': []}\n",
-        "        iteration = 0\n",
-        "\n",
-        "        # If there are more iterations than mini-batches in the data loader,\n",
-        "        # it will have to loop over it more than once\n",
-        "        while (iteration < num_iter):\n",
-        "            # That's the typical mini-batch inner loop\n",
-        "            for x_batch, y_batch in data_loader:\n",
-        "                x_batch = x_batch.to(self.device)\n",
-        "                y_batch = y_batch.to(self.device)\n",
-        "                # Step 1\n",
-        "                yhat = self.model(x_batch)\n",
-        "                # Step 2\n",
-        "                loss = self.loss_fn(yhat, y_batch)\n",
-        "                # Step 3\n",
-        "                loss.backward()\n",
-        "\n",
-        "                # Here we keep track of the losses (smoothed)\n",
-        "                # and the learning rates\n",
-        "                tracking['lr'].append(scheduler.get_last_lr()[0])\n",
-        "                if iteration == 0:\n",
-        "                    tracking['loss'].append(loss.item())\n",
-        "                else:\n",
-        "                    prev_loss = tracking['loss'][-1]\n",
-        "                    smoothed_loss = alpha * loss.item() + (1-alpha) * prev_loss\n",
-        "                    tracking['loss'].append(smoothed_loss)\n",
-        "\n",
-        "                iteration += 1\n",
-        "                # Number of iterations reached\n",
-        "                if iteration == num_iter:\n",
-        "                    break\n",
-        "\n",
-        "                # Step 4\n",
-        "                self.optimizer.step()\n",
-        "                scheduler.step()\n",
-        "                self.optimizer.zero_grad()\n",
-        "\n",
-        "        # Restores the original states\n",
-        "        self.optimizer.load_state_dict(previous_states['optimizer'])\n",
-        "        self.model.load_state_dict(previous_states['model'])\n",
-        "\n",
-        "        if ax is None:\n",
-        "            fig, ax = plt.subplots(1, 1, figsize=(6, 4))\n",
-        "        else:\n",
-        "            fig = ax.get_figure()\n",
-        "        ax.plot(tracking['lr'], tracking['loss'])\n",
-        "        if step_mode == 'exp':\n",
-        "            ax.set_xscale('log')\n",
-        "        ax.set_xlabel('Learning Rate')\n",
-        "        ax.set_ylabel('Loss')\n",
-        "        fig.tight_layout()\n",
-        "        return tracking, fig\n",
-        "\n",
-        "    def set_optimizer(self, optimizer):\n",
-        "        self.optimizer = optimizer\n",
-        "\n",
-        "    def capture_gradients(self, layers_to_hook):\n",
-        "        if not isinstance(layers_to_hook, list):\n",
-        "            layers_to_hook = [layers_to_hook]\n",
-        "\n",
-        "        modules = list(self.model.named_modules())\n",
-        "        self._gradients = {}\n",
-        "\n",
-        "        def make_log_fn(name, parm_id):\n",
-        "            def log_fn(grad):\n",
-        "                self._gradients[name][parm_id].append(grad.tolist())\n",
-        "                return\n",
-        "            return log_fn\n",
-        "\n",
-        "        for name, layer in self.model.named_modules():\n",
-        "            if name in layers_to_hook:\n",
-        "                self._gradients.update({name: {}})\n",
-        "                for parm_id, p in layer.named_parameters():\n",
-        "                    if p.requires_grad:\n",
-        "                        self._gradients[name].update({parm_id: []})\n",
-        "                        log_fn = make_log_fn(name, parm_id)\n",
-        "                        self.handles[f'{name}.{parm_id}.grad'] = p.register_hook(log_fn)\n",
-        "        return\n",
-        "\n",
-        "    def capture_parameters(self, layers_to_hook):\n",
-        "        if not isinstance(layers_to_hook, list):\n",
-        "            layers_to_hook = [layers_to_hook]\n",
-        "\n",
-        "        modules = list(self.model.named_modules())\n",
-        "        layer_names = {layer: name for name, layer in modules}\n",
-        "\n",
-        "        self._parameters = {}\n",
-        "\n",
-        "        for name, layer in modules:\n",
-        "            if name in layers_to_hook:\n",
-        "                self._parameters.update({name: {}})\n",
-        "                for parm_id, p in layer.named_parameters():\n",
-        "                    self._parameters[name].update({parm_id: []})\n",
-        "\n",
-        "        def fw_hook_fn(layer, inputs, outputs):\n",
-        "            name = layer_names[layer]\n",
-        "            for parm_id, parameter in layer.named_parameters():\n",
-        "                self._parameters[name][parm_id].append(parameter.tolist())\n",
-        "\n",
-        "        self.attach_hooks(layers_to_hook, fw_hook_fn)\n",
-        "        return\n",
-        "\n",
-        "    def set_lr_scheduler(self, scheduler):\n",
-        "        # Makes sure the scheduler in the argument is assigned to the\n",
-        "        # optimizer we're using in this class\n",
-        "        if scheduler.optimizer == self.optimizer:\n",
-        "            self.scheduler = scheduler\n",
-        "            if (isinstance(scheduler, optim.lr_scheduler.CyclicLR) or\n",
-        "                isinstance(scheduler, optim.lr_scheduler.OneCycleLR) or\n",
-        "                isinstance(scheduler, optim.lr_scheduler.CosineAnnealingWarmRestarts)):\n",
-        "                self.is_batch_lr_scheduler = True\n",
-        "            else:\n",
-        "                self.is_batch_lr_scheduler = False\n",
-        "\n",
-        "    def _epoch_schedulers(self, val_loss):\n",
-        "        if self.scheduler:\n",
-        "            if not self.is_batch_lr_scheduler:\n",
-        "                if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):\n",
-        "                    self.scheduler.step(val_loss)\n",
-        "                else:\n",
-        "                    self.scheduler.step()\n",
-        "\n",
-        "                current_lr = list(map(lambda d: d['lr'], self.scheduler.optimizer.state_dict()['param_groups']))\n",
-        "                self.learning_rates.append(current_lr)\n",
-        "\n",
-        "    def _mini_batch_schedulers(self, frac_epoch):\n",
-        "        if self.scheduler:\n",
-        "            if self.is_batch_lr_scheduler:\n",
-        "                if isinstance(self.scheduler, optim.lr_scheduler.CosineAnnealingWarmRestarts):\n",
-        "                    self.scheduler.step(self.total_epochs + frac_epoch)\n",
-        "                else:\n",
-        "                    self.scheduler.step()\n",
-        "\n",
-        "                current_lr = list(map(lambda d: d['lr'], self.scheduler.optimizer.state_dict()['param_groups']))\n",
-        "                self.learning_rates.append(current_lr)\n",
-        "\n",
-        "    def set_clip_grad_value(self, clip_value):\n",
-        "        self.clipping = lambda: nn.utils.clip_grad_value_(self.model.parameters(), clip_value=clip_value)\n",
-        "\n",
-        "    def set_clip_grad_norm(self, max_norm, norm_type=2):\n",
-        "        self.clipping = lambda: nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm, norm_type=norm_type)\n",
-        "\n",
-        "    def set_clip_backprop(self, clip_value):\n",
-        "        if self.clipping is None:\n",
-        "            self.clipping = []\n",
-        "        for p in self.model.parameters():\n",
-        "            if p.requires_grad:\n",
-        "                func = lambda grad: torch.clamp(grad, -clip_value, clip_value)\n",
-        "                handle = p.register_hook(func)\n",
-        "                self.clipping.append(handle)\n",
-        "\n",
-        "    def remove_clip(self):\n",
-        "        if isinstance(self.clipping, list):\n",
-        "            for handle in self.clipping:\n",
-        "                handle.remove()\n",
-        "        self.clipping = None"
-      ],
-      "metadata": {
-        "id": "_fwjzWxWEg5V"
-      },
-      "execution_count": 213,
-      "outputs": []
-    }
-  ],
-  "metadata": {
-    "colab": {
-      "provenance": [],
-      "include_colab_link": true
-    },
-    "kernelspec": {
-      "display_name": "Python 3",
-      "name": "python3"
-    },
-    "language_info": {
-      "name": "python"
-    }
-  },
-  "nbformat": 4,
-  "nbformat_minor": 0
-}
+import numpy as np
+import datetime
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import random
+import matplotlib.pyplot as plt
+from copy import deepcopy
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.transforms import Normalize
+from torch.optim.lr_scheduler import LambdaLR
+import types
+import inspect
+
+plt.style.use('fivethirtyeight')
+
+def make_lr_fn(start_iter, end_lr, num_iter, step_mode="exp"):
+    if(step_mode == "linear"):
+        factor = (end_lr / start_iter-1)/num_iter
+        def lr_fn(iteration):
+            return(1 + iteration * factor)
+    else:
+        factor = (np.log(end_lr)-np.log(start_iter))/num_iter
+        def lr_fn(iteration):
+            return np.exp(factor)**iteration
+    return lr_fn
+
+class DeepLearningEssential(object):
+    def __init__(self, model, loss_fn, optimizer):
+        self.model = model
+        self.loss_fn = loss_fn
+        self.optimizer = optimizer
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model.to(self.device)
+
+        self.train_loader = None
+        self.val_loader = None
+        self.writer = None
+        self.scheduler = None
+        self.is_batch_lr_scheduler = False
+        self.clipping = None
+
+        self.losses = []
+        self.val_losses = []
+        self.learning_rates = []
+        self.total_epochs = 0
+
+        self.visualization = {}
+        self.handles = {}
+
+        self.train_step_fn = self._make_train_step_fn
+        self.val_step_fn = self._make_val_step_fn
+
+    def to(self, device):
+        try:
+            self.device = device
+            self.model.to(self.device)
+        except RuntimeError:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            print(f"Couldn't send it to {device}, sending it to {self.device} instead.")
+            self.model.to(self.device)
+
+    def set_loaders(self, train_loader, val_loader=None):
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+
+    def set_tensorboard(self, name, folder="runs"):
+        suffix = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+        self.writer = SummaryWriter(f'{folder}/{name}_{suffix}')
+
+    def _make_train_step_fn(self,x,y):
+        self.model.train()
+        yhat = self.model(x)
+        loss = self.loss_fn(yhat,y)
+        loss.backward()
+
+        if(self.clipping):
+                self.clipping()
+
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+
+        return loss.item()
+
+    def _make_val_step_fn(self,x,y):
+        self.model.eval()
+        yhat = self.model(x)
+        loss = self.loss_fn(yhat,y)
+        return loss.item()
+
+    def set_train_step_fn(self, new_func=None):
+        if(new_func is None):
+            self.train_step_fn = self._make_train_step_fn()
+            return
+        self.train_step_fn = types.MethodType(new_func, self)
+
+    def set_val_step_fn(self, new_func=None):
+        if(new_func is None):
+            self.val_step_fn = self._make_val_step_fn()
+            return
+        self.val_step_fn = types.MethodType(new_func, self)
+
+    def print_train_fn(self):
+        print(inspect.getsource(self.train_step_fn))
+
+    def print_val_fn(self):
+        print(inspect.getsource(self.val_step_fn))
+
+    def _mini_batch(self, validation=False):
+        if validation:
+            data_loader = self.val_loader
+            step_fn = self.val_step_fn
+        else:
+            data_loader = self.train_loader
+            step_fn = self.train_step_fn
+
+        if data_loader is None:
+            return None
+
+        n_batches = len(data_loader)
+
+        mini_batch_losses = []
+        for i, (x_batch, y_batch) in enumerate(data_loader):
+
+            if isinstance(x_batch, list):
+                for i in x_batch:
+                    i.to(self.device)
+            else:
+                x_batch = x_batch.to(self.device)
+
+            if isinstance(y_batch, list):
+                for i in y_batch:
+                    i.to(self.device)
+            else:
+                y_batch = y_batch.to(self.device)
+
+            mini_batch_loss = step_fn(x_batch, y_batch)
+            mini_batch_losses.append(mini_batch_loss)
+
+            if not validation:
+                self._mini_batch_schedulers(i / n_batches)
+
+            loss = np.mean(mini_batch_losses)
+            return loss
+
+    def set_seed(self, seed=42):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        try:
+            self.train_loader.sampler.generator.manual_seed(seed)
+        except AttributeError:
+            pass
+
+    def train(self, n_epochs, seed=42):
+        self.set_seed(seed)
+
+        for epoch in range(n_epochs):
+            self.total_epochs+=1
+
+            loss = self._mini_batch(validation=False)
+            self.losses.append(loss)
+
+            with torch.no_grad():
+                val_loss = self._mini_batch(validation=True)
+                self.val_losses.append(val_loss)
+
+            self._epoch_schedulers(val_loss)
+
+            if self.writer:
+                scalars = {'training': loss}
+                if val_loss is not None:
+                    scalars.update({'validation': val_loss})
+
+                self.writer.add_scalars(main_tag='loss',
+                                        tag_scalar_dict=scalars,
+                                        global_step=epoch)
+
+        if self.writer:
+            self.writer.close()
+
+    def save_checkpoint(self, filename):
+        checkpoint = {
+            "epoch" : self.total_epochs,
+            "model_state_dict" : self.model.state_dict(),
+            "optimizer_state_dict" : self.optimizer.state_dict(),
+            "loss" : self.losses,
+            "val_losses" : self.val_losses
+        }
+
+        torch.save(checkpoint, filename)
+
+    def load_checkpoint(self, filename):
+        checkpoint = torch.load(filename, weights_only=False)
+
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        self.total_epochs = checkpoint['epoch']
+        self.losses = checkpoint['loss']
+        self.val_losses = checkpoint['val_loss']
+
+        self.model.train()
+
+    def predict(self, x):
+        self.model.eval()
+        x = torch.as_tensor(x).float()
+        yhat = self.model(x.to(self.device))
+        self.model.train()
+        return yhat.detach().cpu().numpy()
+
+    def plot_losses(self):
+        fig = plt.figure(figsize=(10, 4))
+        plt.plot(self.losses, label='Training Loss', c='b')
+        plt.plot(self.val_losses, label='Validation Loss', c='r')
+        plt.yscale('log')
+        plt.xlabel('Epochs')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.tight_layout()
+        return fig
+
+    def add_graph(self):
+        if self.train_loader and self.writer:
+            x_sample, y_sample = next(iter(self.train_loader))
+            self.writer.add_graph(self.model, x_sample.to(self.device))
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+    @staticmethod
+    def _visualize_tensors(axs, x, y=None, yhat=None, layer_name='', title=None):
+        n_images = len(axs)
+        minv, maxv = np.min(x[:n_images]), np.max(x[:n_images])
+        for j, image in enumerate(x[:n_images]):
+            ax = axs[j]
+            # Sets title, labels, and removes ticks
+            if title is not None:
+                ax.set_title('{} #{}'.format(title, j), fontsize=12)
+            ax.set_ylabel(
+                '{}\n{}x{}'.format(layer_name, *np.atleast_2d(image).shape),
+                rotation=0, labelpad=40
+            )
+            xlabel1 = '' if y is None else '\nLabel: {}'.format(y[j])
+            xlabel2 = '' if yhat is None else '\nPredicted: {}'.format(yhat[j])
+            xlabel = '{}{}'.format(xlabel1, xlabel2)
+            if len(xlabel):
+                ax.set_xlabel(xlabel, fontsize=12)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            # Plots weight as an image
+            ax.imshow(
+                np.atleast_2d(image.squeeze()),
+                cmap='gray',
+                vmin=minv,
+                vmax=maxv
+            )
+        return
+
+    def visualize_filters(self, layer_name, **kwargs):
+        try:
+            # Gets the layer object from the model
+            layer = self.model
+            for name in layer_name.split('.'):
+                layer = getattr(layer, name)
+            # We are only looking at filters for 2D convolutions
+            if isinstance(layer, nn.Conv2d):
+                # Takes the weight information
+                weights = layer.weight.data.cpu().numpy()
+                # The weights have channels_out (filter), channels_in, H, W shape
+                n_filters, n_channels, _, _ = weights.shape
+
+                # Builds a figure
+                size = (2 * n_channels + 2, 2 * n_filters)
+                fig, axes = plt.subplots(n_filters, n_channels, figsize=size)
+                axes = np.atleast_2d(axes).reshape(n_filters, n_channels)
+                # For each channel_out (filter)
+                for i in range(n_filters):
+                    DeepLearningEssential._visualize_tensors(
+                        axes[i, :],
+                        weights[i],
+                        layer_name='Filter #{}'.format(i),
+                        title='Channel' if (i == 0) else None
+                    )
+
+                for ax in axes.flat:
+                    ax.label_outer()
+
+                fig.tight_layout()
+                return fig
+
+        except AttributeError:
+            return
+
+    def attach_hooks(self, layers_to_hook, hook_fn=None):
+        # Clear any previous values
+        self.visualization = {}
+        # Creates the dictionary to map layer objects to their names
+        modules = list(self.model.named_modules())
+        layer_names = {layer: name for name, layer in modules[1:]}
+
+        if hook_fn is None:
+            # Hook function to be attached to the forward pass
+            def hook_fn(layer, inputs, outputs):
+                # Gets the layer name
+                name = layer_names[layer]
+                # Detaches outputs
+                values = outputs.detach().cpu().numpy()
+                # Since the hook function may be called multiple times
+                # for example, if we make predictions for multiple mini-batches
+                # it concatenates the results
+                if self.visualization[name] is None:
+                    self.visualization[name] = values
+                else:
+                    self.visualization[name] = np.concatenate([self.visualization[name], values])
+
+        for name, layer in modules:
+            # If the layer is in our list
+            if name in layers_to_hook:
+                # Initializes the corresponding key in the dictionary
+                self.visualization[name] = None
+                # Register the forward hook and keep the handle in another dict
+                self.handles[name] = layer.register_forward_hook(hook_fn)
+
+    def remove_hooks(self):
+        # Loops through all hooks and removes them
+        for handle in self.handles.values():
+            handle.remove()
+        # Clear the dict, as all hooks have been removed
+        self.handles = {}
+
+    def visualize_outputs(self, layers, n_images=10, y=None, yhat=None):
+        layers = list(filter(lambda l: l in self.visualization.keys(), layers))
+        shapes = [self.visualization[layer].shape for layer in layers]
+        n_rows = [shape[1] if len(shape) == 4 else 1 for shape in shapes]
+        total_rows = np.sum(n_rows)
+
+        fig, axes = plt.subplots(total_rows, n_images, figsize=(1.5*n_images, 1.5*total_rows))
+        axes = np.atleast_2d(axes).reshape(total_rows, n_images)
+
+        # Loops through the layers, one layer per row of subplots
+        row = 0
+        for i, layer in enumerate(layers):
+            start_row = row
+            # Takes the produced feature maps for that layer
+            output = self.visualization[layer]
+
+            is_vector = len(output.shape) == 2
+
+            for j in range(n_rows[i]):
+                DeepLearningEssential._visualize_tensors(
+                    axes[row, :],
+                    output if is_vector else output[:, j].squeeze(),
+                    y,
+                    yhat,
+                    layer_name=layers[i] if is_vector else '{}\nfil#{}'.format(layers[i], row-start_row),
+                    title='Image' if (row == 0) else None
+                )
+                row += 1
+
+        for ax in axes.flat:
+            ax.label_outer()
+
+        plt.tight_layout()
+        return fig
+
+    def correct(self, x, y, threshold=.5):
+        self.model.eval()
+        yhat = self.model(x.to(self.device))
+        y = y.to(self.device)
+        self.model.train()
+
+        # We get the size of the batch and the number of classes
+        # (only 1, if it is binary)
+        n_samples, n_dims = yhat.shape
+        if n_dims > 1:
+            # In a multiclass classification, the biggest logit
+            # always wins, so we don't bother getting probabilities
+
+            # This is PyTorch's version of argmax,
+            # but it returns a tuple: (max value, index of max value)
+            _, predicted = torch.max(yhat, 1)
+        else:
+            n_dims += 1
+            # In binary classification, we NEED to check if the
+            # last layer is a sigmoid (and then it produces probs)
+            if isinstance(self.model, nn.Sequential) and \
+               isinstance(self.model[-1], nn.Sigmoid):
+                predicted = (yhat > threshold).long()
+            # or something else (logits), which we need to convert
+            # using a sigmoid
+            else:
+                predicted = (torch.sigmoid(yhat) > threshold).long()
+
+        # How many samples got classified correctly for each class
+        result = []
+        for c in range(n_dims):
+            n_class = (y == c).sum().item()
+            n_correct = (predicted[y == c] == c).sum().item()
+            result.append((n_correct, n_class))
+        return torch.tensor(result)
+
+    @staticmethod
+    def loader_apply(loader, func, reduce='sum'):
+        results = [func(x, y) for i, (x, y) in enumerate(loader)]
+        results = torch.stack(results, axis=0)
+
+        if reduce == 'sum':
+            results = results.sum(axis=0)
+        elif reduce == 'mean':
+            results = results.float().mean(axis=0)
+
+        return results
+
+    @staticmethod
+    def statistics_per_channel(images, labels):
+        # NCHW
+        n_samples, n_channels, n_height, n_weight = images.size()
+        # Flatten HW into a single dimension
+        flatten_per_channel = images.reshape(n_samples, n_channels, -1)
+
+        # Computes statistics of each image per channel
+        # Average pixel value per channel
+        # (n_samples, n_channels)
+        means = flatten_per_channel.mean(axis=2)
+        # Standard deviation of pixel values per channel
+        # (n_samples, n_channels)
+        stds = flatten_per_channel.std(axis=2)
+
+        # Adds up statistics of all images in a mini-batch
+        # (1, n_channels)
+        sum_means = means.sum(axis=0)
+        sum_stds = stds.sum(axis=0)
+        # Makes a tensor of shape (1, n_channels)
+        # with the number of samples in the mini-batch
+        n_samples = torch.tensor([n_samples]*n_channels).float()
+
+        # Stack the three tensors on top of one another
+        # (3, n_channels)
+        return torch.stack([n_samples, sum_means, sum_stds], axis=0)
+
+    @staticmethod
+    def make_normalizer(loader):
+        total_samples, total_means, total_stds = DeepLearningEssential.loader_apply(loader, DeepLearningEssential.statistics_per_channel)
+        norm_mean = total_means / total_samples
+        norm_std = total_stds / total_samples
+        return Normalize(mean=norm_mean, std=norm_std)
+
+    def lr_range_test(self, data_loader, end_lr, num_iter=100, step_mode='exp', alpha=0.05, ax=None):
+        # Since the test updates both model and optimizer we need to store
+        # their initial states to restore them in the end
+        previous_states = {'model': deepcopy(self.model.state_dict()),
+                           'optimizer': deepcopy(self.optimizer.state_dict())}
+        # Retrieves the learning rate set in the optimizer
+        start_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+
+        # Builds a custom function and corresponding scheduler
+        lr_fn = make_lr_fn(start_lr, end_lr, num_iter)
+        scheduler = LambdaLR(self.optimizer, lr_lambda=lr_fn)
+
+        # Variables for tracking results and iterations
+        tracking = {'loss': [], 'lr': []}
+        iteration = 0
+
+        # If there are more iterations than mini-batches in the data loader,
+        # it will have to loop over it more than once
+        while (iteration < num_iter):
+            # That's the typical mini-batch inner loop
+            for x_batch, y_batch in data_loader:
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+                # Step 1
+                yhat = self.model(x_batch)
+                # Step 2
+                loss = self.loss_fn(yhat, y_batch)
+                # Step 3
+                loss.backward()
+
+                # Here we keep track of the losses (smoothed)
+                # and the learning rates
+                tracking['lr'].append(scheduler.get_last_lr()[0])
+                if iteration == 0:
+                    tracking['loss'].append(loss.item())
+                else:
+                    prev_loss = tracking['loss'][-1]
+                    smoothed_loss = alpha * loss.item() + (1-alpha) * prev_loss
+                    tracking['loss'].append(smoothed_loss)
+
+                iteration += 1
+                # Number of iterations reached
+                if iteration == num_iter:
+                    break
+
+                # Step 4
+                self.optimizer.step()
+                scheduler.step()
+                self.optimizer.zero_grad()
+
+        # Restores the original states
+        self.optimizer.load_state_dict(previous_states['optimizer'])
+        self.model.load_state_dict(previous_states['model'])
+
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        else:
+            fig = ax.get_figure()
+        ax.plot(tracking['lr'], tracking['loss'])
+        if step_mode == 'exp':
+            ax.set_xscale('log')
+        ax.set_xlabel('Learning Rate')
+        ax.set_ylabel('Loss')
+        fig.tight_layout()
+        return tracking, fig
+
+    def set_optimizer(self, optimizer):
+        self.optimizer = optimizer
+
+    def capture_gradients(self, layers_to_hook):
+        if not isinstance(layers_to_hook, list):
+            layers_to_hook = [layers_to_hook]
+
+        modules = list(self.model.named_modules())
+        self._gradients = {}
+
+        def make_log_fn(name, parm_id):
+            def log_fn(grad):
+                self._gradients[name][parm_id].append(grad.tolist())
+                return
+            return log_fn
+
+        for name, layer in self.model.named_modules():
+            if name in layers_to_hook:
+                self._gradients.update({name: {}})
+                for parm_id, p in layer.named_parameters():
+                    if p.requires_grad:
+                        self._gradients[name].update({parm_id: []})
+                        log_fn = make_log_fn(name, parm_id)
+                        self.handles[f'{name}.{parm_id}.grad'] = p.register_hook(log_fn)
+        return
+
+    def capture_parameters(self, layers_to_hook):
+        if not isinstance(layers_to_hook, list):
+            layers_to_hook = [layers_to_hook]
+
+        modules = list(self.model.named_modules())
+        layer_names = {layer: name for name, layer in modules}
+
+        self._parameters = {}
+
+        for name, layer in modules:
+            if name in layers_to_hook:
+                self._parameters.update({name: {}})
+                for parm_id, p in layer.named_parameters():
+                    self._parameters[name].update({parm_id: []})
+
+        def fw_hook_fn(layer, inputs, outputs):
+            name = layer_names[layer]
+            for parm_id, parameter in layer.named_parameters():
+                self._parameters[name][parm_id].append(parameter.tolist())
+
+        self.attach_hooks(layers_to_hook, fw_hook_fn)
+        return
+
+    def set_lr_scheduler(self, scheduler):
+        # Makes sure the scheduler in the argument is assigned to the
+        # optimizer we're using in this class
+        if scheduler.optimizer == self.optimizer:
+            self.scheduler = scheduler
+            if (isinstance(scheduler, optim.lr_scheduler.CyclicLR) or
+                isinstance(scheduler, optim.lr_scheduler.OneCycleLR) or
+                isinstance(scheduler, optim.lr_scheduler.CosineAnnealingWarmRestarts)):
+                self.is_batch_lr_scheduler = True
+            else:
+                self.is_batch_lr_scheduler = False
+
+    def _epoch_schedulers(self, val_loss):
+        if self.scheduler:
+            if not self.is_batch_lr_scheduler:
+                if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(val_loss)
+                else:
+                    self.scheduler.step()
+
+                current_lr = list(map(lambda d: d['lr'], self.scheduler.optimizer.state_dict()['param_groups']))
+                self.learning_rates.append(current_lr)
+
+    def _mini_batch_schedulers(self, frac_epoch):
+        if self.scheduler:
+            if self.is_batch_lr_scheduler:
+                if isinstance(self.scheduler, optim.lr_scheduler.CosineAnnealingWarmRestarts):
+                    self.scheduler.step(self.total_epochs + frac_epoch)
+                else:
+                    self.scheduler.step()
+
+                current_lr = list(map(lambda d: d['lr'], self.scheduler.optimizer.state_dict()['param_groups']))
+                self.learning_rates.append(current_lr)
+
+    def set_clip_grad_value(self, clip_value):
+        self.clipping = lambda: nn.utils.clip_grad_value_(self.model.parameters(), clip_value=clip_value)
+
+    def set_clip_grad_norm(self, max_norm, norm_type=2):
+        self.clipping = lambda: nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm, norm_type=norm_type)
+
+    def set_clip_backprop(self, clip_value):
+        if self.clipping is None:
+            self.clipping = []
+        for p in self.model.parameters():
+            if p.requires_grad:
+                func = lambda grad: torch.clamp(grad, -clip_value, clip_value)
+                handle = p.register_hook(func)
+                self.clipping.append(handle)
+
+    def remove_clip(self):
+        if isinstance(self.clipping, list):
+            for handle in self.clipping:
+                handle.remove()
+        self.clipping = None
