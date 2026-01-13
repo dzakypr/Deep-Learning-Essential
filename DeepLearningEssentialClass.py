@@ -11,6 +11,7 @@ from torchvision.transforms import Normalize
 from torch.optim.lr_scheduler import LambdaLR
 import types
 import inspect
+from tqdm import tqdm
 
 plt.style.use('fivethirtyeight')
 
@@ -157,7 +158,7 @@ class DeepLearningEssential(object):
     def train(self, n_epochs, seed=42):
         self.set_seed(seed)
 
-        for epoch in range(n_epochs):
+        for epoch in tqdm(range(n_epochs)):
             self.total_epochs+=1
 
             loss = self._mini_batch(validation=False)
