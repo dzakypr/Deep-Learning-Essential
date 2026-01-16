@@ -28,10 +28,13 @@ def make_lr_fn(start_iter, end_lr, num_iter, step_mode="exp"):
 
 class DeepLearningEssential(object):
     def __init__(self, model, loss_fn, optimizer):
-        self.model = model
-        self.loss_fn = loss_fn
-        self.optimizer = optimizer
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model = model
+        self.loss_fn = loss_fn.to(self.device)
+        if isinstance(self.loss_fn, dict):
+            for key in self.loss_fn:
+                self.loss_fn[key] = self.loss_fn[key].to(self.device)
+        self.optimizer = optimizer
         self.model.to(self.device)
 
         self.train_loader = None
