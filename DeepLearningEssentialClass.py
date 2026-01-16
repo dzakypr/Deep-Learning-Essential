@@ -124,14 +124,12 @@ class DeepLearningEssential(object):
         for i, (x_batch, y_batch) in enumerate(data_loader):
 
             if isinstance(x_batch, list):
-                for i in x_batch:
-                    i.to(self.device)
+                x_batch = [x.to(self.device) for x in x_batch]
             else:
                 x_batch = x_batch.to(self.device)
 
             if isinstance(y_batch, list):
-                for i in y_batch:
-                    i.to(self.device)
+                y_batch = [y.to(self.device) for y in y_batch]
             else:
                 y_batch = y_batch.to(self.device)
 
