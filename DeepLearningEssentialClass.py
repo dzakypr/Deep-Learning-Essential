@@ -145,8 +145,8 @@ class DeepLearningEssential(object):
             if not validation:
                 self._mini_batch_schedulers(i / n_batches)
 
-            loss = np.mean(mini_batch_losses)
-            return loss
+        loss = np.mean(mini_batch_losses)
+        return loss
 
     def set_seed(self, seed=42):
         torch.backends.cudnn.deterministic = True
@@ -163,7 +163,6 @@ class DeepLearningEssential(object):
         self.set_seed(seed)
 
         for epoch in tqdm(range(n_epochs)):
-            self.total_epochs+=1
 
             loss = self._mini_batch(validation=False)
             self.losses.append(loss)
@@ -182,6 +181,7 @@ class DeepLearningEssential(object):
                 self.writer.add_scalars(main_tag='loss',
                                         tag_scalar_dict=scalars,
                                         global_step=epoch)
+            self.total_epochs+=1
 
         if self.writer:
             self.writer.close()
